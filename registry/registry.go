@@ -5,53 +5,44 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 
-	"github.com/containers/image/docker"
-	"github.com/containers/image/types"
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/google"
+
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
 var tags []string
 
-var ref types.ImageReference
-var img types.Image
-var imgSrc types.ImageSource
+var img v1.Image
+var ref name.Reference
 var allFiles map[string]*tar.Header
 
 func init() {
-	ref, _ = docker.ParseReference("//gcr.io/google-appengine/debian8")
-	img, _ = ref.NewImage(nil)
-	imgSrc, _ = ref.NewImageSource(nil, nil)
+	ref, _ = name.ParseReference("gcr.io/google-appengine/debian9:latest", name.WeakValidation)
+	img, _ = remote.Image(ref)
 }
 
 func Manifest() ([]byte, error) {
-	contents, _, err := img.Manifest()
-	return contents, err
+	return img.RawManifest()
 }
 
 func Tags() ([]string, error) {
-	var err error
-	if tags != nil {
-		return tags, nil
-	}
-
-	dockerImg, ok := img.(*docker.Image)
-	if !ok {
-		return nil, fmt.Errorf("Unable to convert to Docker image.")
-	}
-
-	tags, err = dockerImg.GetRepositoryTags()
+	r, _ := name.NewRepository("gcr.io/google-appengine/debian9", name.WeakValidation)
+	tags, err := google.List(r, authn.Anonymous, http.DefaultTransport)
 	if err != nil {
 		return nil, err
 	}
-	return tags, nil
+	return tags.Tags, nil
 }
 
-func GetFileFromBlob(name string, digest types.BlobInfo) ([]byte, error) {
-	b, _, err := imgSrc.GetBlob(digest)
-	if err != nil {
-		return nil, err
-	}
+func GetFileFromBlob(name string, digest v1.Hash) ([]byte, error) {
+	l, _ := img.LayerByDigest(digest)
+	b, _ := l.Compressed()
 	gzf, err := gzip.NewReader(b)
 	if err != nil {
 		return nil, err
@@ -74,11 +65,10 @@ func GetFileFromBlob(name string, digest types.BlobInfo) ([]byte, error) {
 }
 
 func GetFileFromImage(name string) ([]byte, error) {
-	blobs := img.LayerInfos()
+	blobs, _ := img.BlobSet()
 	fmt.Println("GetFileFromImage: ", name)
-	for i := len(blobs) - 1; i >= 0; i-- {
-		blob := blobs[i]
-		f, err := GetFileFromBlob(name, blob)
+	for b := range blobs {
+		f, err := GetFileFromBlob(name, b)
 		if err != nil {
 			return nil, err
 		}
@@ -92,10 +82,11 @@ func GetFileFromImage(name string) ([]byte, error) {
 func cacheAllFiles() error {
 	allFiles = make(map[string]*tar.Header)
 
-	blobs := img.LayerInfos()
-	for _, b := range blobs {
-		bi, _, _ := imgSrc.GetBlob(b)
-		gzf, err := gzip.NewReader(bi)
+	blobs, _ := img.BlobSet()
+	for b := range blobs {
+		l, _ := img.LayerByDigest(b)
+		uc, _ := l.Compressed()
+		gzf, err := gzip.NewReader(uc)
 		if err != nil {
 			return err
 		}
